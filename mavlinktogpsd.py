@@ -15,7 +15,7 @@ print("Heartbeat received from MAVLink endpoint")
 def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp):
     """Convert MAVLink GPS data to a gpsd-style JSON TPV report."""
     # Convert MAVLink fix type to gpsd mode
-    mode = 3 if fix_type == 3 else 2 if fix_type == 2 else 0  # 3D, 2D, or no fix
+    mode = 3 if fix_type == 3 else 2 if fix_type == 2 else 1  # 3D, 2D, or no fix
     
     report = {
         "class": "TPV",
@@ -47,10 +47,10 @@ def generate_sky_report():
     for i in range(8):
         satellite = {
             "PRN": i + 1,  # Satellite ID
-            "el": 45,      # Elevation (degrees)
-            "az": 180,     # Azimuth (degrees)
+            "el": 45 + i,  # Elevation (degrees)
+            "az": (180 + i * 30) % 360,  # Azimuth (degrees)
             "ss": 40 + i,  # Signal strength (dBHz)
-            "used": True   # Is the satellite used for the fix?
+            "used": True if i < 5 else False  # Only use the first 5 satellites for the fix
         }
         sky_report["satellites"].append(satellite)
 
