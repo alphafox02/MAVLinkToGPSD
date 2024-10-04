@@ -5,7 +5,7 @@ import threading
 from pymavlink import mavutil
 
 # MAVLink connection
-connection_string = 'udp:127.0.0.1:14550'
+connection_string = 'udp:127.0.0.1:14569'
 mavlink_connection = mavutil.mavlink_connection(connection_string)
 
 # Wait for a heartbeat before requesting data
