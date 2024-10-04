@@ -77,41 +77,21 @@ def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp, use_s
     return json.dumps(report) + "\n"
 
 def generate_sky_report():
-    """Generate a GPSD SKY report based on real satellite data from GPS_STATUS."""
-    
-    # Try to receive the GPS_STATUS message from MAVLink
-    msg = mavlink_connection.recv_match(type='GPS_STATUS', blocking=False)
-    
-    if not msg:
-        # If no GPS_STATUS message is available, return an empty SKY report
-        return json.dumps({
-            "class": "SKY",
-            "device": "/dev/mavlink",
-            "satellites": []
-        }) + "\n"
-    
-    # Parse the GPS_STATUS message
-    satellites_visible = msg.satellites_visible
-    satellite_prn = msg.satellite_prn
-    satellite_used = msg.satellite_used
-    satellite_elevation = msg.satellite_elevation
-    satellite_azimuth = msg.satellite_azimuth
-    satellite_snr = msg.satellite_snr
-    
+    """Generate a GPSD SKY report with simulated satellite data."""
     sky_report = {
         "class": "SKY",
         "device": "/dev/mavlink",
         "satellites": []
     }
     
-    # Loop through visible satellites and add their information to the SKY report
-    for i in range(satellites_visible):
+    # Simulate 8 satellites in view
+    for i in range(8):
         satellite = {
-            "PRN": satellite_prn[i],  # Satellite ID
-            "el": satellite_elevation[i],  # Elevation in degrees
-            "az": int((satellite_azimuth[i] * 360) / 255),  # Convert azimuth to degrees
-            "ss": satellite_snr[i],  # Signal strength (SNR) in dB
-            "used": satellite_used[i] == 1  # True if the satellite is used for localization
+            "PRN": i + 1,  # Satellite ID
+            "el": 45 + i,  # Elevation in degrees (simulated)
+            "az": (180 + i * 30) % 360,  # Azimuth in degrees (simulated)
+            "ss": 40 + i,  # Signal strength (simulated)
+            "used": i < 5  # Only use the first 5 satellites for the fix
         }
         sky_report["satellites"].append(satellite)
     
