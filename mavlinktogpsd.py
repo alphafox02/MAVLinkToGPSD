@@ -5,7 +5,7 @@ import threading
 from pymavlink import mavutil
 
 # MAVLink connection
-connection_string = 'udp:127.0.0.1:14569'
+connection_string = 'udp:127.0.0.1:14550'
 mavlink_connection = mavutil.mavlink_connection(connection_string)
 
 # Wait for a heartbeat before requesting data
@@ -16,11 +16,20 @@ def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp):
     """Convert MAVLink GPS data to a gpsd-style JSON TPV report."""
     # Convert MAVLink fix type to gpsd mode
     mode = 3 if fix_type == 3 else 2 if fix_type == 2 else 1  # 3D, 2D, or no fix
-    
+
+    # Use GPS time from MAVLink if available, fallback to system time with a warning
+    if timestamp:
+        gps_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(timestamp / 1e6))
+        time_source = "GPS"
+    else:
+        gps_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+        time_source = "System"
+        print(f"Warning: Using system time {gps_time} due to missing GPS time.")
+
     report = {
         "class": "TPV",
         "device": "/dev/mavlink",
-        "time": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(timestamp / 1e6)),  # Convert microseconds to seconds
+        "time": gps_time,  # Properly formatted GPS/system time
         "mode": mode,  # GPS mode (2D or 3D fix)
         "lat": lat,  # Latitude
         "lon": lon,  # Longitude
@@ -73,26 +82,16 @@ def handle_client_connection(client_socket):
         client_socket.sendall(b'{"class":"DEVICES","devices":[{"class":"DEVICE","path":"/dev/mavlink","activated":"2022-10-10T00:00:00.000Z","flags":1}]}\n')
 
         while True:
-            # Receive MAVLink GPS data
-            msg = mavlink_connection.recv_match(type=['GPS_RAW_INT', 'GLOBAL_POSITION_INT'], blocking=True)
+            # Receive MAVLink GPS_RAW_INT data only
+            msg = mavlink_connection.recv_match(type='GPS_RAW_INT', blocking=True)
             if msg:
-                if msg.get_type() == 'GPS_RAW_INT':
-                    lat = msg.lat / 1e7  # Convert to degrees
-                    lon = msg.lon / 1e7  # Convert to degrees
-                    alt = msg.alt / 1000.0  # Convert to meters
-                    speed = msg.vel / 100  # Convert from cm/s to m/s
-                    track = msg.cog / 100  # Convert from centi-degrees to degrees
-                    fix_type = msg.fix_type  # 1 = No fix, 2 = 2D fix, 3 = 3D fix
-                    timestamp = msg.time_usec  # GPS time in microseconds
-
-                elif msg.get_type() == 'GLOBAL_POSITION_INT':
-                    lat = msg.lat / 1e7
-                    lon = msg.lon / 1e7
-                    alt = msg.alt / 1000.0
-                    speed = msg.vx / 100.0  # Convert from cm/s to m/s
-                    track = msg.hdg / 100.0  # Convert from centi-degrees to degrees
-                    fix_type = 3  # GLOBAL_POSITION_INT usually implies a 3D fix
-                    timestamp = int(time.time() * 1e6)  # Use system time in microseconds
+                lat = msg.lat / 1e7  # Convert to degrees
+                lon = msg.lon / 1e7  # Convert to degrees
+                alt = msg.alt / 1000.0  # Convert to meters
+                speed = msg.vel / 100  # Convert from cm/s to m/s
+                track = msg.cog / 100  # Convert from centi-degrees to degrees
+                fix_type = msg.fix_type  # 1 = No fix, 2 = 2D fix, 3 = 3D fix
+                timestamp = msg.time_usec  # GPS time in microseconds
 
                 # Convert to GPSD-style TPV JSON report
                 gpsd_report = mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp)
