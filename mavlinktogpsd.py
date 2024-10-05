@@ -5,11 +5,24 @@ import threading
 import argparse
 import os
 import ctypes
+import subprocess
+import logging
 from pymavlink import mavutil
 
-# Create the shared memory key and attach to it (only if --use-shm is specified)
-SHM_KEY = "/dev/shm/chrony_shm"  # Shared memory key
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,  # Default to INFO; DEBUG will log more details if needed
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("/var/log/mavlink_gpsd.log"),  # Log to file
+        logging.StreamHandler()  # Log to stdout for systemd to capture
+    ]
+)
 
+# Path to the shared memory file
+SHM_KEY = "/dev/shm/chrony_shm"
+
+# Define the SHM structure
 class ShmTime(ctypes.Structure):
     _fields_ = [("mode", ctypes.c_int),
                 ("count", ctypes.c_uint),
@@ -21,6 +34,18 @@ class ShmTime(ctypes.Structure):
                 ("precision", ctypes.c_int),
                 ("nsamples", ctypes.c_int),
                 ("valid", ctypes.c_int)]
+
+def create_shm_file():
+    """Ensure that the SHM file exists and is writable."""
+    if os.path.exists(SHM_KEY):
+        logging.info(f"Shared memory file {SHM_KEY} already exists.")
+    else:
+        try:
+            subprocess.run(['sudo', 'touch', SHM_KEY], check=True)
+            subprocess.run(['sudo', 'chmod', '777', SHM_KEY], check=True)
+            logging.info(f"Created and set permissions for SHM file: {SHM_KEY}")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Failed to create SHM file: {e}")
 
 def update_shm_time(time_seconds):
     """Write GPS time to shared memory in Chrony's SHM format."""
@@ -35,14 +60,27 @@ def update_shm_time(time_seconds):
     shm.receiveTimeNsec = current_time_nsec
     shm.valid = 1  # Time is valid
 
-    with open(SHM_KEY, 'wb') as shm_file:
-        shm_file.write(bytearray(shm))
+    # Ensure the SHM file exists
+    create_shm_file()
+
+    # Write to the SHM file
+    try:
+        with open(SHM_KEY, 'wb') as shm_file:
+            shm_file.write(bytearray(shm))
+            logging.info(f"Updated SHM file: {SHM_KEY}")
+    except PermissionError:
+        logging.error(f"Permission error: Unable to write to {SHM_KEY}. Ensure the script has the proper permissions.")
 
 def clean_up_shm():
-    """Clean up shared memory (remove SHM file)."""
+    """Remove the SHM file on cleanup."""
     if os.path.exists(SHM_KEY):
-        os.remove(SHM_KEY)
-        print(f"Shared memory at {SHM_KEY} has been cleaned up.")
+        try:
+            subprocess.run(['sudo', 'rm', SHM_KEY], check=True)
+            logging.info(f"Shared memory file {SHM_KEY} has been removed.")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Failed to remove SHM file: {e}")
+    else:
+        logging.info(f"Shared memory file {SHM_KEY} does not exist.")
 
 def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp, use_shm=False):
     """Convert MAVLink GPS data to a gpsd-style JSON TPV report."""
@@ -55,7 +93,7 @@ def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp, use_s
             update_shm_time(gps_time_seconds)  # Write time to shared memory for Chrony
     else:
         gps_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
-        print(f"Warning: Using system time {gps_time} due to missing GPS time.")
+        logging.warning(f"Using system time {gps_time} due to missing GPS time.")
 
     report = {
         "class": "TPV",
@@ -103,7 +141,7 @@ def start_gpsd_server():
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind(('localhost', 2947))  # gpsd default port
     server_socket.listen(5)  # Allow up to 5 concurrent connections
-    print("Simulated gpsd running on port 2947. Waiting for clients...")
+    logging.info("Simulated gpsd running on port 2947. Waiting for clients...")
     return server_socket
 
 def handle_client_connection(client_socket, use_shm):
@@ -126,18 +164,18 @@ def handle_client_connection(client_socket, use_shm):
 
                 gpsd_report = mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp, use_shm)
                 client_socket.sendall(gpsd_report.encode('ascii'))
-                print(f"Sent TPV: {gpsd_report.strip()}")
+                logging.debug(f"Sent TPV: {gpsd_report.strip()}")
 
                 sky_report = generate_sky_report()
                 client_socket.sendall(sky_report.encode('ascii'))
-                print(f"Sent SKY: {sky_report.strip()}")
+                logging.debug(f"Sent SKY: {sky_report.strip()}")
 
             time.sleep(1)
 
     except (BrokenPipeError, ConnectionResetError):
-        print("Client disconnected unexpectedly.")
+        logging.warning("Client disconnected unexpectedly.")
     except KeyboardInterrupt:
-        print("Server interrupted by user.")
+        logging.info("Server interrupted by user.")
     finally:
         client_socket.close()
 
@@ -149,11 +187,11 @@ def run_server(use_shm):
         while True:
             try:
                 client_socket, client_addr = server_socket.accept()
-                print(f"Client {client_addr} connected!")
+                logging.info(f"Client {client_addr} connected!")
                 client_thread = threading.Thread(target=handle_client_connection, args=(client_socket, use_shm))
                 client_thread.start()
             except KeyboardInterrupt:
-                print("Server interrupted by user.")
+                logging.info("Server interrupted by user.")
                 break
     finally:
         server_socket.close()
@@ -168,7 +206,7 @@ def parse_arguments():
 
 def check_sudo():
     if os.geteuid() != 0:
-        print("This script must be run with sudo to enable shared memory (SHM).")
+        logging.error("This script must be run with sudo to enable shared memory (SHM).")
         exit(1)
 
 # Main execution
@@ -184,7 +222,7 @@ if __name__ == "__main__":
 
     # Wait for a heartbeat before requesting data
     mavlink_connection.wait_heartbeat()
-    print("Heartbeat received from MAVLink endpoint")
+    logging.info("Heartbeat received from MAVLink endpoint")
 
     # Start the gpsd server with optional shared memory support
     run_server(args.use_shm)
