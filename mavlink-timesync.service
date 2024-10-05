@@ -3,7 +3,7 @@ Description=MAVLink System Time Synchronization
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/mavlink_time_sync.py
+ExecStart=/usr/local/bin/mavlinktimesync.py
 User=root
 Restart=always
 
