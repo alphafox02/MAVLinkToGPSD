@@ -12,10 +12,10 @@ import signal
 
 # Setup logging
 logging.basicConfig(
-    level=logging.INFO,  # Default to INFO; DEBUG will log more details if needed
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("/var/log/mavlink_gpsd.log"),  # Log to file
+        logging.FileHandler("/var/log/mavlink_gpsd.log"),
         logging.StreamHandler()  # Log to stdout for systemd to capture
     ]
 )
@@ -30,6 +30,7 @@ shutdown_event = threading.Event()  # Event to signal all threads to stop
 
 # Client connections
 connected_clients = []
+client_lock = threading.Lock()  # Use a lock to safely modify the connected clients list
 
 # Define the SHM structure
 class ShmTime(ctypes.Structure):
@@ -103,7 +104,7 @@ def mimic_gpsd_with_system_time():
 def poll_mavlink_for_gps():
     """Poll MAVLink endpoint for GPS data, update SHM, and send GPS data to clients."""
     while not shutdown_event.is_set():
-        msg = mavlink_connection.recv_match(type='GPS_RAW_INT', blocking=True)
+        msg = mavlink_connection.recv_match(type='GPS_RAW_INT', blocking=True, timeout=1)
         if msg:
             lat = msg.lat / 1e7
             lon = msg.lon / 1e7
@@ -118,17 +119,19 @@ def poll_mavlink_for_gps():
 
             gpsd_report = mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp)
 
-            for client_socket in connected_clients:
-                try:
-                    client_socket.sendall(gpsd_report.encode('ascii'))
-                    logging.debug(f"Sent TPV to client: {gpsd_report.strip()}")
+            # Safely send to all connected clients
+            with client_lock:
+                for client_socket in connected_clients:
+                    try:
+                        client_socket.sendall(gpsd_report.encode('ascii'))
+                        logging.debug(f"Sent TPV to client: {gpsd_report.strip()}")
 
-                    sky_report = generate_sky_report()
-                    client_socket.sendall(sky_report.encode('ascii'))
-                    logging.debug(f"Sent SKY report to client: {sky_report.strip()}")
+                        sky_report = generate_sky_report()
+                        client_socket.sendall(sky_report.encode('ascii'))
+                        logging.debug(f"Sent SKY report to client: {sky_report.strip()}")
 
-                except (BrokenPipeError, ConnectionResetError):
-                    connected_clients.remove(client_socket)  # Remove disconnected clients
+                    except (BrokenPipeError, ConnectionResetError):
+                        connected_clients.remove(client_socket)  # Remove disconnected clients
 
             time.sleep(1)  # Avoid busy-waiting
 
@@ -200,7 +203,8 @@ def start_gpsd_server():
 def handle_client_connection(client_socket):
     """Handles communication with a connected client."""
     try:
-        connected_clients.append(client_socket)
+        with client_lock:
+            connected_clients.append(client_socket)
 
         client_socket.sendall(b'{"class":"VERSION","release":"3.20","rev":"3.20","proto_major":3,"proto_minor":14}\n')
         client_socket.sendall(b'{"class":"DEVICES","devices":[{"class":"DEVICE","path":"/dev/mavlink","activated":"2022-10-10T00:00:00.000Z","flags":1}]}\n')
@@ -212,11 +216,13 @@ def handle_client_connection(client_socket):
 
     except (BrokenPipeError, ConnectionResetError):
         logging.warning("Client disconnected unexpectedly.")
-        if client_socket in connected_clients:
-            connected_clients.remove(client_socket)
+        with client_lock:
+            if client_socket in connected_clients:
+                connected_clients.remove(client_socket)
     finally:
-        if client_socket in connected_clients:
-            connected_clients.remove(client_socket)
+        with client_lock:
+            if client_socket in connected_clients:
+                connected_clients.remove(client_socket)
         client_socket.close()
 
 def run_server():
@@ -225,11 +231,14 @@ def run_server():
         server_socket = start_gpsd_server()
 
         while not shutdown_event.is_set():
+            server_socket.settimeout(1)  # Set a timeout to periodically check for shutdown
             try:
                 client_socket, client_addr = server_socket.accept()
                 logging.info(f"Client {client_addr} connected!")
                 client_thread = threading.Thread(target=handle_client_connection, args=(client_socket,))
                 client_thread.start()
+            except socket.timeout:
+                continue  # Timeout allows shutdown_event to be checked
             except KeyboardInterrupt:
                 shutdown_event.set()
                 logging.info("Server interrupted by user.")
@@ -281,4 +290,3 @@ if __name__ == "__main__":
     gps_poll_thread.start()
 
     run_server()
-
