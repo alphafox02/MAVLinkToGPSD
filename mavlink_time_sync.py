@@ -4,7 +4,7 @@ import ctypes
 from pymavlink import mavutil
 
 # Connect to MAVLink (update the connection string if needed)
-connection_string = 'udp:127.0.0.1:14569'
+connection_string = 'udp:127.0.0.1:14570'
 mavlink_connection = mavutil.mavlink_connection(connection_string)
 
 # Function to set system time using the MAVLink SYSTEM_TIME message
