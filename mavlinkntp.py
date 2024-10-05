@@ -4,7 +4,7 @@ import time
 from pymavlink import mavutil
 
 # MAVLink connection setup
-connection_string = 'udp:127.0.0.1:14569'
+connection_string = 'udp:127.0.0.1:14570'
 mavlink_connection = mavutil.mavlink_connection(connection_string)
 
 # Function to get time from MAVLink SYSTEM_TIME message
