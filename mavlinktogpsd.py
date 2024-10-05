@@ -146,27 +146,38 @@ def clean_up_shm():
     else:
         logging.info(f"Shared memory file {SHM_KEY} does not exist.")
 
-def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp):
+def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp, use_shm=False):
     """Convert MAVLink GPS data to a gpsd-style JSON TPV report."""
     mode = 3 if fix_type == 3 else 2 if fix_type == 2 else 1  # 3D, 2D, or no fix
-    
-    gps_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(timestamp / 1e6))
 
+    if timestamp:
+        # Convert microseconds to seconds and format to GPSD-compatible time
+        gps_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(timestamp / 1e6))
+        gps_time_seconds = timestamp / 1e6  # Convert to seconds for SHM
+        if use_shm:
+            update_shm_time(gps_time_seconds, source="GPS")  # Write GPS time to SHM
+        logging.debug(f"GPS time: {gps_time} (valid timestamp from GPS)")
+    else:
+        # Fall back to system time if GPS time is not available
+        gps_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+        logging.warning(f"GPS timestamp missing, using system time: {gps_time}")
+    
+    # Create the TPV report for gpsd clients
     report = {
         "class": "TPV",
         "device": "/dev/mavlink",
-        "time": gps_time,
-        "mode": mode,
-        "lat": lat,
-        "lon": lon,
-        "alt": alt,
-        "altHAE": alt,
-        "speed": speed,
-        "track": track,
-        "ept": 0.005,
-        "epx": 5.0,
-        "epy": 5.0,
-        "epv": 5.0
+        "time": gps_time,  # Correct GPS/system time
+        "mode": mode,  # GPS mode (2D or 3D fix)
+        "lat": lat,  # Latitude
+        "lon": lon,  # Longitude
+        "alt": alt,  # Altitude in meters
+        "altHAE": alt,  # Height above ellipsoid (same as alt for now)
+        "speed": speed,  # Speed in m/s
+        "track": track,  # Heading in degrees
+        "ept": 0.005,  # Estimated precision of time
+        "epx": 5.0,  # Estimated precision of latitude
+        "epy": 5.0,  # Estimated precision of longitude
+        "epv": 5.0  # Estimated precision of altitude
     }
 
     return json.dumps(report) + "\n"
@@ -200,29 +211,41 @@ def start_gpsd_server():
     logging.info("Simulated gpsd running on port 2947. Waiting for clients...")
     return server_socket
 
-def handle_client_connection(client_socket):
+def handle_client_connection(client_socket, use_shm):
     """Handles communication with a connected client."""
     try:
-        with client_lock:
-            connected_clients.append(client_socket)
-
+        # Send gpsd handshake messages
         client_socket.sendall(b'{"class":"VERSION","release":"3.20","rev":"3.20","proto_major":3,"proto_minor":14}\n')
         client_socket.sendall(b'{"class":"DEVICES","devices":[{"class":"DEVICE","path":"/dev/mavlink","activated":"2022-10-10T00:00:00.000Z","flags":1}]}\n')
 
-        client_socket.settimeout(None)
-
         while not shutdown_event.is_set():
+            msg = mavlink_connection.recv_match(type='GPS_RAW_INT', blocking=True)
+            if msg:
+                lat = msg.lat / 1e7
+                lon = msg.lon / 1e7
+                alt = msg.alt / 1000.0
+                speed = msg.vel / 100
+                track = msg.cog / 100
+                fix_type = msg.fix_type
+                timestamp = msg.time_usec  # GPS time in microseconds
+
+                # Create TPV JSON report for gpsd clients
+                gpsd_report = mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp, use_shm)
+                client_socket.sendall(gpsd_report.encode('ascii'))
+                logging.debug(f"Sent TPV report to client: {gpsd_report.strip()}")
+
+                # Also send simulated SKY data (satellites in view)
+                sky_report = generate_sky_report()
+                client_socket.sendall(sky_report.encode('ascii'))
+                logging.debug(f"Sent SKY report to client: {sky_report.strip()}")
+
             time.sleep(1)
 
     except (BrokenPipeError, ConnectionResetError):
         logging.warning("Client disconnected unexpectedly.")
-        with client_lock:
-            if client_socket in connected_clients:
-                connected_clients.remove(client_socket)
+    except KeyboardInterrupt:
+        logging.info("Server interrupted by user.")
     finally:
-        with client_lock:
-            if client_socket in connected_clients:
-                connected_clients.remove(client_socket)
         client_socket.close()
 
 def run_server():
