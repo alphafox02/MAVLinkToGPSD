@@ -32,29 +32,27 @@ def ntp_server():
 
         # Convert the current time to NTP format (seconds since 1900)
         ntp_time = int((current_time + 2208988800))  # 1900-based epoch
-        ntp_time_frac = int((current_time % 1) * (2**32))  # Fraction of a second
 
-        # Create the NTP response packet (properly packed)
+        # Create the NTP response packet (corrected to pack all 15 items)
         response = struct.pack(
             '!B B B b 11I',
-            0b00100011,  # Leap Indicator (0), Version Number (4), Mode (3 for server)
+            0b00100011,  # Leap Indicator, Version Number, Mode
             1,           # Stratum (secondary server)
-            4,           # Poll interval (log2 seconds between messages)
+            0,           # Poll interval (log2 seconds between messages)
             -6,          # Precision (log2 seconds)
-            0,           # Root Delay (32-bit)
-            0,           # Root Dispersion (32-bit)
-            0xDEADBEEF,  # Reference ID (mocked, can be changed)
-            ntp_time,    # Reference Timestamp seconds
-            ntp_time_frac,  # Reference Timestamp fraction
-            ntp_time,    # Originate Timestamp seconds
-            ntp_time_frac,  # Originate Timestamp fraction
-            ntp_time,    # Receive Timestamp seconds
-            ntp_time_frac,  # Receive Timestamp fraction
-            ntp_time,    # Transmit Timestamp seconds
-            ntp_time_frac  # Transmit Timestamp fraction
+            0, 0,        # Root Delay & Root Dispersion (not used here)
+            0xDEADBEEF,  # Reference ID (mocked)
+            ntp_time,    # Reference Timestamp
+            0,           # Reference Timestamp (fraction)
+            ntp_time,    # Originate Timestamp (time at client)
+            0,           # Originate Timestamp (fraction)
+            ntp_time,    # Receive Timestamp (time at server when received)
+            0,           # Receive Timestamp (fraction)
+            ntp_time,    # Transmit Timestamp (time at server when sent)
+            0            # Transmit Timestamp (fraction)
         )
 
-        # Send the response back to the client (Chrony)
+        # Send the response back to the client
         server_socket.sendto(response, address)
 
 if __name__ == "__main__":
