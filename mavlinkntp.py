@@ -1,10 +1,10 @@
 import socket
-import time
 import struct
+import time
 from pymavlink import mavutil
 
-# MAVLink connection setup (replace with your connection string)
-connection_string = 'udp:127.0.0.1:14570'
+# MAVLink connection setup
+connection_string = 'udp:127.0.0.1:14569'
 mavlink_connection = mavutil.mavlink_connection(connection_string)
 
 # Function to get time from MAVLink SYSTEM_TIME message
@@ -33,9 +33,24 @@ def ntp_server():
         # Convert the current time to NTP format (seconds since 1900)
         ntp_time = int((current_time + 2208988800))  # 1900-based epoch
 
-        # Create the NTP response packet
-        response = struct.pack('!B B B b 11I', 0b00100011, 0, 0, -20,
-                               0, 0, 0, 0, 0, ntp_time, 0, ntp_time, ntp_time)
+        # Create the NTP response packet (corrected to pack all 15 items)
+        response = struct.pack(
+            '!B B B b 11I',
+            0b00100011,  # Leap Indicator, Version Number, Mode
+            1,           # Stratum (secondary server)
+            0,           # Poll interval (log2 seconds between messages)
+            -6,          # Precision (log2 seconds)
+            0, 0,        # Root Delay & Root Dispersion (not used here)
+            0xDEADBEEF,  # Reference ID (mocked)
+            ntp_time,    # Reference Timestamp
+            0,           # Reference Timestamp (fraction)
+            ntp_time,    # Originate Timestamp (time at client)
+            0,           # Originate Timestamp (fraction)
+            ntp_time,    # Receive Timestamp (time at server when received)
+            0,           # Receive Timestamp (fraction)
+            ntp_time,    # Transmit Timestamp (time at server when sent)
+            0            # Transmit Timestamp (fraction)
+        )
 
         # Send the response back to the client
         server_socket.sendto(response, address)
