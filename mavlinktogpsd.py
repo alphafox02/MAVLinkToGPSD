@@ -22,6 +22,9 @@ logging.basicConfig(
 # Path to the shared memory file
 SHM_KEY = "/dev/shm/chrony_shm"
 
+# Track the last update time to avoid redundant SHM updates
+last_update_time = None
+
 # Define the SHM structure
 class ShmTime(ctypes.Structure):
     _fields_ = [("mode", ctypes.c_int),
@@ -47,8 +50,14 @@ def create_shm_file():
         except subprocess.CalledProcessError as e:
             logging.error(f"Failed to create SHM file: {e}")
 
-def update_shm_time(time_seconds):
-    """Write GPS time to shared memory in Chrony's SHM format."""
+def update_shm_time(time_seconds, source="System"):
+    """Write time (system or GPS) to shared memory in Chrony's SHM format."""
+    global last_update_time
+
+    # Only update SHM if time has changed significantly (to avoid redundant updates)
+    if last_update_time is not None and abs(last_update_time - time_seconds) < 1:
+        return  # No significant change in time; skip the update
+
     current_time_sec = int(time_seconds)
     current_time_nsec = int((time_seconds - current_time_sec) * 1e9)
 
@@ -67,9 +76,38 @@ def update_shm_time(time_seconds):
     try:
         with open(SHM_KEY, 'wb') as shm_file:
             shm_file.write(bytearray(shm))
-            logging.info(f"Updated SHM file: {SHM_KEY}")
+            logging.info(f"Updated SHM file with {source} time: {time_seconds}")
+        last_update_time = time_seconds  # Track last updated time
     except PermissionError:
         logging.error(f"Permission error: Unable to write to {SHM_KEY}. Ensure the script has the proper permissions.")
+
+def mimic_gpsd_with_system_time():
+    """Mimic gpsd by updating SHM with system time until GPS data is available."""
+    while True:
+        system_time = time.time()  # Get current system time
+        update_shm_time(system_time, source="System")  # Write system time to SHM
+        time.sleep(1)  # Update every second until GPS data is available
+
+def poll_mavlink_for_gps():
+    """Poll MAVLink endpoint for GPS data and update SHM with GPS time."""
+    while True:
+        msg = mavlink_connection.recv_match(type='GPS_RAW_INT', blocking=True)
+        if msg:
+            # Extract GPS data from MAVLink message
+            lat = msg.lat / 1e7
+            lon = msg.lon / 1e7
+            alt = msg.alt / 1000.0
+            speed = msg.vel / 100
+            track = msg.cog / 100
+            fix_type = msg.fix_type
+            timestamp = msg.time_usec  # Get GPS time in microseconds
+
+            # Update SHM with GPS time
+            gps_time_seconds = timestamp / 1e6  # Convert to seconds
+            update_shm_time(gps_time_seconds, source="GPS")
+
+            logging.info(f"Received GPS data: lat={lat}, lon={lon}, alt={alt}, time={gps_time_seconds}")
+        time.sleep(1)  # Avoid busy-waiting
 
 def clean_up_shm():
     """Remove the SHM file on cleanup."""
@@ -82,59 +120,6 @@ def clean_up_shm():
     else:
         logging.info(f"Shared memory file {SHM_KEY} does not exist.")
 
-def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp, use_shm=False):
-    """Convert MAVLink GPS data to a gpsd-style JSON TPV report."""
-    mode = 3 if fix_type == 3 else 2 if fix_type == 2 else 1  # 3D, 2D, or no fix
-    
-    if timestamp:
-        gps_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(timestamp / 1e6))
-        gps_time_seconds = timestamp / 1e6  # Convert to seconds
-        if use_shm:
-            update_shm_time(gps_time_seconds)  # Write time to shared memory for Chrony
-    else:
-        gps_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
-        logging.warning(f"Using system time {gps_time} due to missing GPS time.")
-
-    report = {
-        "class": "TPV",
-        "device": "/dev/mavlink",
-        "time": gps_time,
-        "mode": mode,
-        "lat": lat,
-        "lon": lon,
-        "alt": alt,
-        "altHAE": alt,
-        "speed": speed,
-        "track": track,
-        "ept": 0.005,
-        "epx": 5.0,
-        "epy": 5.0,
-        "epv": 5.0
-    }
-
-    return json.dumps(report) + "\n"
-
-def generate_sky_report():
-    """Generate a GPSD SKY report with simulated satellite data."""
-    sky_report = {
-        "class": "SKY",
-        "device": "/dev/mavlink",
-        "satellites": []
-    }
-    
-    # Simulate 8 satellites in view
-    for i in range(8):
-        satellite = {
-            "PRN": i + 1,  # Satellite ID
-            "el": 45 + i,  # Elevation in degrees (simulated)
-            "az": (180 + i * 30) % 360,  # Azimuth in degrees (simulated)
-            "ss": 40 + i,  # Signal strength (simulated)
-            "used": i < 5  # Only use the first 5 satellites for the fix
-        }
-        sky_report["satellites"].append(satellite)
-    
-    return json.dumps(sky_report) + "\n"
-
 def start_gpsd_server():
     """Starts a simulated gpsd server on localhost:2947."""
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -144,7 +129,7 @@ def start_gpsd_server():
     logging.info("Simulated gpsd running on port 2947. Waiting for clients...")
     return server_socket
 
-def handle_client_connection(client_socket, use_shm):
+def handle_client_connection(client_socket):
     """Handles communication with a connected client."""
     try:
         # Send gpsd handshake messages
@@ -152,26 +137,8 @@ def handle_client_connection(client_socket, use_shm):
         client_socket.sendall(b'{"class":"DEVICES","devices":[{"class":"DEVICE","path":"/dev/mavlink","activated":"2022-10-10T00:00:00.000Z","flags":1}]}\n')
 
         while True:
-            msg = mavlink_connection.recv_match(type='GPS_RAW_INT', blocking=True)
-            if msg:
-                lat = msg.lat / 1e7
-                lon = msg.lon / 1e7
-                alt = msg.alt / 1000.0
-                speed = msg.vel / 100
-                track = msg.cog / 100
-                fix_type = msg.fix_type
-                timestamp = msg.time_usec
-
-                gpsd_report = mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp, use_shm)
-                client_socket.sendall(gpsd_report.encode('ascii'))
-                logging.debug(f"Sent TPV: {gpsd_report.strip()}")
-
-                sky_report = generate_sky_report()
-                client_socket.sendall(sky_report.encode('ascii'))
-                logging.debug(f"Sent SKY: {sky_report.strip()}")
-
+            # Handle client requests (if any)...
             time.sleep(1)
-
     except (BrokenPipeError, ConnectionResetError):
         logging.warning("Client disconnected unexpectedly.")
     except KeyboardInterrupt:
@@ -179,7 +146,7 @@ def handle_client_connection(client_socket, use_shm):
     finally:
         client_socket.close()
 
-def run_server(use_shm):
+def run_server():
     """Runs the simulated gpsd server and handles multiple client connections."""
     try:
         server_socket = start_gpsd_server()
@@ -188,15 +155,14 @@ def run_server(use_shm):
             try:
                 client_socket, client_addr = server_socket.accept()
                 logging.info(f"Client {client_addr} connected!")
-                client_thread = threading.Thread(target=handle_client_connection, args=(client_socket, use_shm))
+                client_thread = threading.Thread(target=handle_client_connection, args=(client_socket,))
                 client_thread.start()
             except KeyboardInterrupt:
                 logging.info("Server interrupted by user.")
                 break
     finally:
         server_socket.close()
-        if use_shm:
-            clean_up_shm()
+        clean_up_shm()
 
 # Command-line argument parsing
 def parse_arguments():
@@ -224,5 +190,16 @@ if __name__ == "__main__":
     mavlink_connection.wait_heartbeat()
     logging.info("Heartbeat received from MAVLink endpoint")
 
-    # Start the gpsd server with optional shared memory support
-    run_server(args.use_shm)
+    # Start thread to mimic gpsd with system time
+    if args.use_shm:
+        system_time_thread = threading.Thread(target=mimic_gpsd_with_system_time)
+        system_time_thread.daemon = True
+        system_time_thread.start()
+
+    # Start thread to poll MAVLink for GPS data and update SHM
+    gps_poll_thread = threading.Thread(target=poll_mavlink_for_gps)
+    gps_poll_thread.daemon = True
+    gps_poll_thread.start()
+
+    # Run the GPSD server
+    run_server()
