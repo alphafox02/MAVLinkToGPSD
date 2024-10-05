@@ -88,7 +88,6 @@ def update_shm_time(time_seconds, source="System"):
         with open(SHM_KEY, 'wb') as shm_file:
             shm_file.write(bytearray(shm))
             last_update_time = time_seconds  # Track last updated time
-            # Log only important events: first creation or significant updates
             logging.debug(f"Updated SHM file with {source} time: {time_seconds}")
     except PermissionError:
         logging.error(f"Permission error: Unable to write to {SHM_KEY}. Ensure the script has the proper permissions.")
@@ -121,11 +120,17 @@ def poll_mavlink_for_gps():
             # Prepare GPSD-style TPV report
             gpsd_report = mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp)
 
-            # Send GPS data to all connected clients
+            # Send GPS data and simulated satellite (SKY) info to all connected clients
             for client_socket in connected_clients:
                 try:
                     client_socket.sendall(gpsd_report.encode('ascii'))
                     logging.debug(f"Sent TPV to client: {gpsd_report.strip()}")
+
+                    # Send simulated SKY report
+                    sky_report = generate_sky_report()
+                    client_socket.sendall(sky_report.encode('ascii'))
+                    logging.debug(f"Sent SKY report to client: {sky_report.strip()}")
+
                 except (BrokenPipeError, ConnectionResetError):
                     connected_clients.remove(client_socket)  # Remove disconnected clients
 
@@ -167,6 +172,27 @@ def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp):
 
     return json.dumps(report) + "\n"
 
+def generate_sky_report():
+    """Generate a simulated GPSD SKY report with satellite info."""
+    sky_report = {
+        "class": "SKY",
+        "device": "/dev/mavlink",
+        "satellites": []
+    }
+    
+    # Simulate 8 satellites in view
+    for i in range(8):
+        satellite = {
+            "PRN": i + 1,  # Satellite ID
+            "el": 45 + i,  # Elevation (degrees)
+            "az": (180 + i * 30) % 360,  # Azimuth (degrees)
+            "ss": 40 + i,  # Signal strength (dBHz)
+            "used": True if i < 5 else False  # Only use the first 5 satellites for the fix
+        }
+        sky_report["satellites"].append(satellite)
+
+    return json.dumps(sky_report) + "\n"
+
 def start_gpsd_server():
     """Starts a simulated gpsd server on localhost:2947."""
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -186,8 +212,12 @@ def handle_client_connection(client_socket):
         client_socket.sendall(b'{"class":"VERSION","release":"3.20","rev":"3.20","proto_major":3,"proto_minor":14}\n')
         client_socket.sendall(b'{"class":"DEVICES","devices":[{"class":"DEVICE","path":"/dev/mavlink","activated":"2022-10-10T00:00:00.000Z","flags":1}]}\n')
 
+        # Set client socket to non-blocking mode
+        client_socket.settimeout(None)
+
         while True:
-            time.sleep(1)
+            time.sleep(1)  # Let the main thread handle GPS data sending
+
     except (BrokenPipeError, ConnectionResetError):
         logging.warning("Client disconnected unexpectedly.")
         if client_socket in connected_clients:
