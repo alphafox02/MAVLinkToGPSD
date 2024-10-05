@@ -11,7 +11,7 @@ from pymavlink import mavutil
 
 # Setup logging
 logging.basicConfig(
-    level=logging.INFO,  # Set default logging level to INFO
+    level=logging.INFO,  # Default to INFO; DEBUG will log more details if needed
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("/var/log/mavlink_gpsd.log"),  # Log to file
@@ -25,6 +25,9 @@ SHM_KEY = "/dev/shm/chrony_shm"
 # Track the last update time to avoid redundant SHM updates
 last_update_time = None
 shm_file_created = False  # Track if SHM file was created
+
+# Client connections
+connected_clients = []
 
 # Define the SHM structure
 class ShmTime(ctypes.Structure):
@@ -98,7 +101,7 @@ def mimic_gpsd_with_system_time():
         time.sleep(1)  # Update every second until GPS data is available
 
 def poll_mavlink_for_gps():
-    """Poll MAVLink endpoint for GPS data and update SHM with GPS time."""
+    """Poll MAVLink endpoint for GPS data, update SHM, and send GPS data to clients."""
     while True:
         msg = mavlink_connection.recv_match(type='GPS_RAW_INT', blocking=True)
         if msg:
@@ -115,9 +118,18 @@ def poll_mavlink_for_gps():
             gps_time_seconds = timestamp / 1e6  # Convert to seconds
             update_shm_time(gps_time_seconds, source="GPS")
 
-            # Log less frequently: only when the GPS data changes significantly
-            logging.debug(f"Received GPS data: lat={lat}, lon={lon}, alt={alt}, time={gps_time_seconds}")
-        time.sleep(1)  # Avoid busy-waiting
+            # Prepare GPSD-style TPV report
+            gpsd_report = mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp)
+
+            # Send GPS data to all connected clients
+            for client_socket in connected_clients:
+                try:
+                    client_socket.sendall(gpsd_report.encode('ascii'))
+                    logging.debug(f"Sent TPV to client: {gpsd_report.strip()}")
+                except (BrokenPipeError, ConnectionResetError):
+                    connected_clients.remove(client_socket)  # Remove disconnected clients
+
+            time.sleep(1)  # Avoid busy-waiting
 
 def clean_up_shm():
     """Remove the SHM file on cleanup."""
@@ -129,6 +141,31 @@ def clean_up_shm():
             logging.error(f"Failed to remove SHM file: {e}")
     else:
         logging.info(f"Shared memory file {SHM_KEY} does not exist.")
+
+def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp):
+    """Convert MAVLink GPS data to a gpsd-style JSON TPV report."""
+    mode = 3 if fix_type == 3 else 2 if fix_type == 2 else 1  # 3D, 2D, or no fix
+    
+    gps_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(timestamp / 1e6))
+
+    report = {
+        "class": "TPV",
+        "device": "/dev/mavlink",
+        "time": gps_time,
+        "mode": mode,
+        "lat": lat,
+        "lon": lon,
+        "alt": alt,
+        "altHAE": alt,
+        "speed": speed,
+        "track": track,
+        "ept": 0.005,
+        "epx": 5.0,
+        "epy": 5.0,
+        "epv": 5.0
+    }
+
+    return json.dumps(report) + "\n"
 
 def start_gpsd_server():
     """Starts a simulated gpsd server on localhost:2947."""
@@ -142,18 +179,24 @@ def start_gpsd_server():
 def handle_client_connection(client_socket):
     """Handles communication with a connected client."""
     try:
+        # Add the client socket to the list of connected clients
+        connected_clients.append(client_socket)
+
         # Send gpsd handshake messages
         client_socket.sendall(b'{"class":"VERSION","release":"3.20","rev":"3.20","proto_major":3,"proto_minor":14}\n')
         client_socket.sendall(b'{"class":"DEVICES","devices":[{"class":"DEVICE","path":"/dev/mavlink","activated":"2022-10-10T00:00:00.000Z","flags":1}]}\n')
 
         while True:
-            # Handle client requests (if any)...
             time.sleep(1)
     except (BrokenPipeError, ConnectionResetError):
         logging.warning("Client disconnected unexpectedly.")
+        if client_socket in connected_clients:
+            connected_clients.remove(client_socket)
     except KeyboardInterrupt:
         logging.info("Server interrupted by user.")
     finally:
+        if client_socket in connected_clients:
+            connected_clients.remove(client_socket)
         client_socket.close()
 
 def run_server():
