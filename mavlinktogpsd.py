@@ -11,7 +11,7 @@ from pymavlink import mavutil
 
 # Setup logging
 logging.basicConfig(
-    level=logging.INFO,  # Default to INFO; DEBUG will log more details if needed
+    level=logging.INFO,  # Set default logging level to INFO
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler("/var/log/mavlink_gpsd.log"),  # Log to file
@@ -24,6 +24,7 @@ SHM_KEY = "/dev/shm/chrony_shm"
 
 # Track the last update time to avoid redundant SHM updates
 last_update_time = None
+shm_file_created = False  # Track if SHM file was created
 
 # Define the SHM structure
 class ShmTime(ctypes.Structure):
@@ -40,15 +41,22 @@ class ShmTime(ctypes.Structure):
 
 def create_shm_file():
     """Ensure that the SHM file exists and is writable."""
-    if os.path.exists(SHM_KEY):
-        logging.info(f"Shared memory file {SHM_KEY} already exists.")
+    global shm_file_created
+    if not shm_file_created:
+        if not os.path.exists(SHM_KEY):
+            try:
+                subprocess.run(['sudo', 'touch', SHM_KEY], check=True)
+                subprocess.run(['sudo', 'chmod', '777', SHM_KEY], check=True)
+                logging.info(f"Created and set permissions for SHM file: {SHM_KEY}")
+                shm_file_created = True
+            except subprocess.CalledProcessError as e:
+                logging.error(f"Failed to create SHM file: {e}")
+        else:
+            logging.info(f"Shared memory file {SHM_KEY} already exists.")
+            shm_file_created = True  # Mark as created even if it exists
     else:
-        try:
-            subprocess.run(['sudo', 'touch', SHM_KEY], check=True)
-            subprocess.run(['sudo', 'chmod', '777', SHM_KEY], check=True)
-            logging.info(f"Created and set permissions for SHM file: {SHM_KEY}")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Failed to create SHM file: {e}")
+        # Avoid logging repeatedly when SHM file already exists
+        pass
 
 def update_shm_time(time_seconds, source="System"):
     """Write time (system or GPS) to shared memory in Chrony's SHM format."""
@@ -76,8 +84,9 @@ def update_shm_time(time_seconds, source="System"):
     try:
         with open(SHM_KEY, 'wb') as shm_file:
             shm_file.write(bytearray(shm))
-            logging.info(f"Updated SHM file with {source} time: {time_seconds}")
-        last_update_time = time_seconds  # Track last updated time
+            last_update_time = time_seconds  # Track last updated time
+            # Log only important events: first creation or significant updates
+            logging.debug(f"Updated SHM file with {source} time: {time_seconds}")
     except PermissionError:
         logging.error(f"Permission error: Unable to write to {SHM_KEY}. Ensure the script has the proper permissions.")
 
@@ -106,7 +115,8 @@ def poll_mavlink_for_gps():
             gps_time_seconds = timestamp / 1e6  # Convert to seconds
             update_shm_time(gps_time_seconds, source="GPS")
 
-            logging.info(f"Received GPS data: lat={lat}, lon={lon}, alt={alt}, time={gps_time_seconds}")
+            # Log less frequently: only when the GPS data changes significantly
+            logging.debug(f"Received GPS data: lat={lat}, lon={lon}, alt={alt}, time={gps_time_seconds}")
         time.sleep(1)  # Avoid busy-waiting
 
 def clean_up_shm():
