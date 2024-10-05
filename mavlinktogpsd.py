@@ -184,8 +184,36 @@ def handle_client_connection(client_socket):
     finally:
         client_socket.close()
 
+def poll_mavlink_for_gps(use_shm):
+    """Poll MAVLink endpoint for GPS data and update SHM regularly regardless of client connections."""
+    while True:
+        try:
+            msg = mavlink_connection.recv_match(type='GPS_RAW_INT', blocking=True)
+            if msg:
+                lat = msg.lat / 1e7
+                lon = msg.lon / 1e7
+                alt = msg.alt / 1000.0
+                speed = msg.vel / 100
+                track = msg.cog / 100
+                fix_type = msg.fix_type
+                timestamp = msg.time_usec  # GPS time in microseconds
+
+                if use_shm:
+                    gps_time_seconds = timestamp / 1e6  # Convert to seconds for SHM
+                    update_shm_time(gps_time_seconds, source="GPS")
+
+            time.sleep(1)
+
+        except KeyboardInterrupt:
+            logging.info("MAVLink polling interrupted by user.")
+            break
+
 def run_server(use_shm):
     """Runs the simulated gpsd server and handles multiple client connections."""
+    # Start MAVLink polling in a separate thread to ensure SHM updates happen regardless of clients
+    polling_thread = threading.Thread(target=poll_mavlink_for_gps, args=(use_shm,))
+    polling_thread.start()
+
     try:
         server_socket = start_gpsd_server()
 
@@ -200,6 +228,7 @@ def run_server(use_shm):
                 break
     finally:
         server_socket.close()
+        polling_thread.join()  # Ensure the MAVLink polling thread terminates correctly
         if use_shm:
             clean_up_shm()
 
