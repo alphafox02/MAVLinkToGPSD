@@ -1,0 +1,16 @@
+[Unit]
+Description=MAVLink GPSD Simulation Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/mavlinktogpsd.py --use-shm  # Path to your script
+Restart=on-failure  # Automatically restart if the script crashes
+RestartSec=5        # Wait 5 seconds before restarting
+User=root           # Run the script as root (necessary for SHM access)
+WorkingDirectory=/usr/local/bin  # Optional, can be set to the directory where the script is located
+StandardOutput=syslog  # Log output to syslog (accessible via journalctl)
+StandardError=syslog
+SyslogIdentifier=mavlink-gpsd  # Log identifier for easy filtering
+
+[Install]
+WantedBy=multi-user.target
