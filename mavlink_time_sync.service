@@ -1,0 +1,11 @@
+[Unit]
+Description=MAVLink System Time Synchronization
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/mavlink_time_sync.py
+User=root
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
