@@ -86,9 +86,9 @@ def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp, use_s
     """Convert MAVLink GPS data to a gpsd-style JSON TPV report."""
     mode = 3 if fix_type == 3 else 2 if fix_type == 2 else 1  # 3D, 2D, or no fix
 
+    # Ensure the GPS time is converted correctly from microseconds to seconds and in UTC
     if timestamp:
-        # Convert microseconds to seconds and format to GPSD-compatible time
-        gps_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(timestamp / 1e6))
+        gps_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(timestamp / 1e6))  # Proper GPS UTC time
         gps_time_seconds = timestamp / 1e6  # Convert to seconds for SHM
         if use_shm:
             update_shm_time(gps_time_seconds, source="GPS")  # Write GPS time to SHM
