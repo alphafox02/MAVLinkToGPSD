@@ -6,14 +6,16 @@ import argparse
 import os
 import ctypes
 import logging
+from logging.handlers import RotatingFileHandler
 from pymavlink import mavutil
 
-# Setup logging
+# Setup rotating logging
+log_handler = RotatingFileHandler("/var/log/mavlink_gpsd.log", maxBytes=5 * 1024 * 1024, backupCount=3)
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO; DEBUG will log more details if needed
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("/var/log/mavlink_gpsd.log"),  # Log to file
+        log_handler,  # Log to file with rotation
         logging.StreamHandler()  # Log to stdout for systemd to capture
     ]
 )
@@ -227,4 +229,5 @@ if __name__ == "__main__":
 
     # Start the gpsd server and optionally update system time
     run_server(args.update_system_time)
+
 
