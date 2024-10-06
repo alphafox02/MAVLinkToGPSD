@@ -3,7 +3,7 @@ Description=MAVLink GPSD Simulation Service
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 /usr/local/bin/mavlinktogpsd.py
+ExecStart=/usr/bin/python3 /usr/local/bin/mavlinktogpsd.py --update-system-time
 Restart=on-failure
 RestartSec=5 
 User=root
