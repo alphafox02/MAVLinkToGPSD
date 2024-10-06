@@ -5,7 +5,6 @@ import threading
 import argparse
 import os
 import ctypes
-import subprocess
 import logging
 from pymavlink import mavutil
 
@@ -19,80 +18,48 @@ logging.basicConfig(
     ]
 )
 
-# Path to the shared memory file
-SHM_KEY = "/dev/shm/chrony0"
-
-# Define the SHM structure
-class ShmTime(ctypes.Structure):
-    _fields_ = [("mode", ctypes.c_int),
-                ("count", ctypes.c_uint),
-                ("clockTimeSec", ctypes.c_int),
-                ("clockTimeNsec", ctypes.c_int),
-                ("receiveTimeSec", ctypes.c_int),
-                ("receiveTimeNsec", ctypes.c_int),
-                ("leap", ctypes.c_int),
-                ("precision", ctypes.c_int),
-                ("nsamples", ctypes.c_int),
-                ("valid", ctypes.c_int)]
-
-def create_shm_file():
-    """Ensure that the SHM file exists and is writable."""
-    if os.path.exists(SHM_KEY):
-        logging.debug(f"Shared memory file {SHM_KEY} already exists.")
-    else:
+# Function to set system time using the MAVLink SYSTEM_TIME message
+def set_system_time_from_mavlink(mavlink_connection):
+    """Set system time from MAVLink SYSTEM_TIME message."""
+    logging.info("Waiting for MAVLink SYSTEM_TIME message to update system time...")
+    while True:
         try:
-            subprocess.run(['sudo', 'touch', SHM_KEY], check=True)
-            subprocess.run(['sudo', 'chmod', '777', SHM_KEY], check=True)
-            logging.info(f"Created and set permissions for SHM file: {SHM_KEY}")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Failed to create SHM file: {e}")
+            msg = mavlink_connection.recv_match(type='SYSTEM_TIME', blocking=True)
+            if msg:
+                # Extract UNIX time in seconds (MAVLink provides time in microseconds)
+                gps_time_seconds = msg.time_unix_usec / 1e6
 
-def update_shm_time(time_seconds, source="GPS"):
-    """Write GPS time to shared memory in Chrony's SHM format."""
-    current_time_sec = int(time_seconds)
-    current_time_nsec = int((time_seconds - current_time_sec) * 1e9)
+                # Convert GPS time to system time format (seconds and nanoseconds)
+                current_time_sec = int(gps_time_seconds)
+                current_time_nsec = int((gps_time_seconds - current_time_sec) * 1e9)
 
-    shm = ShmTime()
-    shm.mode = 1  # Use GPS mode
-    shm.clockTimeSec = current_time_sec
-    shm.clockTimeNsec = current_time_nsec
-    shm.receiveTimeSec = current_time_sec
-    shm.receiveTimeNsec = current_time_nsec
-    shm.valid = 1  # Time is valid
+                # Create a timespec structure to hold the time values
+                class Timespec(ctypes.Structure):
+                    _fields_ = [("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long)]
 
-    # Ensure the SHM file exists
-    create_shm_file()
+                # Update system time using clock_settime (requires root privileges)
+                clock_settime = ctypes.CDLL('libc.so.6').clock_settime
+                clock_settime.argtypes = [ctypes.c_int, ctypes.POINTER(Timespec)]
+                CLOCK_REALTIME = 0  # Constant for system real-time clock
 
-    # Write to the SHM file
-    try:
-        with open(SHM_KEY, 'wb') as shm_file:
-            shm_file.write(bytearray(shm))
-            logging.debug(f"Updated SHM file with {source} time: {SHM_KEY}")
-    except PermissionError:
-        logging.error(f"Permission error: Unable to write to {SHM_KEY}. Ensure the script has the proper permissions.")
+                timespec = Timespec(tv_sec=current_time_sec, tv_nsec=current_time_nsec)
+                if clock_settime(CLOCK_REALTIME, ctypes.byref(timespec)) == 0:
+                    logging.info(f"System time updated to {time.ctime(current_time_sec)}")
+                else:
+                    logging.error("Failed to set system time. Are you running as root?")
+                
+                time.sleep(60)  # Update system time every 60 seconds
 
-def clean_up_shm():
-    """Remove the SHM file on cleanup."""
-    if os.path.exists(SHM_KEY):
-        try:
-            subprocess.run(['sudo', 'rm', SHM_KEY], check=True)
-            logging.info(f"Shared memory file {SHM_KEY} has been removed.")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Failed to remove SHM file: {e}")
-    else:
-        logging.debug(f"Shared memory file {SHM_KEY} does not exist.")
+        except KeyboardInterrupt:
+            logging.info("System time update interrupted by user.")
+            break
 
-def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp, use_shm=False):
+def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp):
     """Convert MAVLink GPS data to a gpsd-style JSON TPV report."""
     mode = 3 if fix_type == 3 else 2 if fix_type == 2 else 1  # 3D, 2D, or no fix
 
     # Convert time to UTC
     gps_time = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(timestamp))
-    
-    # Update SHM time for Chrony if enabled
-    if use_shm:
-        update_shm_time(timestamp, source="GPS")
-    
     logging.debug(f"GPS time from SYSTEM_TIME: {gps_time}")
 
     report = {
@@ -185,8 +152,8 @@ def handle_client_connection(client_socket):
     finally:
         client_socket.close()
 
-def poll_mavlink_for_gps(use_shm):
-    """Poll MAVLink endpoint for SYSTEM_TIME and GPS_RAW_INT and update SHM regularly regardless of client connections."""
+def poll_mavlink_for_gps():
+    """Poll MAVLink endpoint for SYSTEM_TIME and GPS_RAW_INT."""
     while True:
         try:
             msg = mavlink_connection.recv_match(type='GPS_RAW_INT', blocking=True)
@@ -201,9 +168,7 @@ def poll_mavlink_for_gps(use_shm):
                 # Fetch the SYSTEM_TIME message for accurate timestamp
                 system_time_msg = mavlink_connection.recv_match(type='SYSTEM_TIME', blocking=False)
                 if system_time_msg:
-                    timestamp = system_time_msg.time_unix_usec / 1e6  # Convert to seconds for SHM
-                    if use_shm:
-                        update_shm_time(timestamp, source="GPS")
+                    timestamp = system_time_msg.time_unix_usec / 1e6  # Convert to seconds
                 else:
                     timestamp = time.time()  # Fallback to system time
 
@@ -213,10 +178,15 @@ def poll_mavlink_for_gps(use_shm):
             logging.info("MAVLink polling interrupted by user.")
             break
 
-def run_server(use_shm):
+def run_server(update_system_time):
     """Runs the simulated gpsd server and handles multiple client connections."""
-    # Start MAVLink polling in a separate thread to ensure SHM updates happen regardless of clients
-    polling_thread = threading.Thread(target=poll_mavlink_for_gps, args=(use_shm,))
+    if update_system_time:
+        # Start system time updating in a separate thread
+        time_update_thread = threading.Thread(target=set_system_time_from_mavlink, args=(mavlink_connection,))
+        time_update_thread.start()
+
+    # Start MAVLink polling in a separate thread
+    polling_thread = threading.Thread(target=poll_mavlink_for_gps)
     polling_thread.start()
 
     try:
@@ -234,26 +204,18 @@ def run_server(use_shm):
     finally:
         server_socket.close()
         polling_thread.join()  # Ensure the MAVLink polling thread terminates correctly
-        if use_shm:
-            clean_up_shm()
+        if update_system_time:
+            time_update_thread.join()  # Ensure the time update thread terminates
 
 # Command-line argument parsing
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Simulated gpsd with optional SHM support.")
-    parser.add_argument('--use-shm', action='store_true', help="Enable shared memory (SHM) for Chrony.")
+    parser = argparse.ArgumentParser(description="Simulated gpsd with optional system time update.")
+    parser.add_argument('--update-system-time', action='store_true', help="Enable system time updates from MAVLink.")
     return parser.parse_args()
-
-def check_sudo():
-    if os.geteuid() != 0:
-        logging.error("This script must be run with sudo to enable shared memory (SHM).")
-        exit(1)
 
 # Main execution
 if __name__ == "__main__":
     args = parse_arguments()
-
-    if args.use_shm:
-        check_sudo()  # Check if running with sudo when using shared memory
 
     # MAVLink connection
     connection_string = 'udp:127.0.0.1:14569'  # Replace with your MAVLink endpoint
@@ -263,5 +225,6 @@ if __name__ == "__main__":
     mavlink_connection.wait_heartbeat()
     logging.info("Heartbeat received from MAVLink endpoint")
 
-    # Start the gpsd server with optional shared memory support
-    run_server(args.use_shm)
+    # Start the gpsd server and optionally update system time
+    run_server(args.update_system_time)
+
