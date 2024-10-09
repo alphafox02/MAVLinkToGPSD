@@ -22,11 +22,21 @@ logging.basicConfig(
 )
 
 async def get_gps_time_from_mavsdk(system):
-    """Fetch GPS time using MAVSDK telemetry."""
-    logging.info("Fetching GPS time from MAVSDK...")
-    async for gps_info in system.telemetry.unix_epoch_time():
-        gps_time_seconds = gps_info.time_us / 1e6  # Convert to seconds
-        return gps_time_seconds
+    """Fetch GPS time using MAVSDK telemetry with retry logic."""
+    retries = 5
+    while retries > 0:
+        try:
+            logging.info("Fetching GPS time from MAVSDK...")
+            async for gps_time in system.telemetry.unix_epoch_time():
+                gps_time_seconds = gps_time  # This gives us the correct Unix time in seconds
+                logging.info(f"Received GPS Unix time: {gps_time_seconds}")
+                return gps_time_seconds
+        except grpc._channel._MultiThreadedRendezvous as e:
+            logging.error(f"GRPC error: {e}, retrying in 5 seconds...")
+            retries -= 1
+            await asyncio.sleep(5)
+    logging.error("Failed to get GPS time after several attempts.")
+    return None
 
 async def set_system_time_from_mavsdk(system):
     """Set system time using the MAVSDK telemetry Unix time."""
