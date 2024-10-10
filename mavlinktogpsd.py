@@ -22,21 +22,11 @@ logging.basicConfig(
 )
 
 async def get_gps_time_from_mavsdk(system):
-    """Fetch GPS time using MAVSDK telemetry with retry logic."""
-    retries = 5
-    while retries > 0:
-        try:
-            logging.info("Fetching GPS time from MAVSDK...")
-            async for gps_time in system.telemetry.unix_epoch_time():
-                gps_time_seconds = gps_time  # This gives us the correct Unix time in seconds
-                logging.info(f"Received GPS Unix time: {gps_time_seconds}")
-                return gps_time_seconds
-        except grpc._channel._MultiThreadedRendezvous as e:
-            logging.error(f"GRPC error: {e}, retrying in 5 seconds...")
-            retries -= 1
-            await asyncio.sleep(5)
-    logging.error("Failed to get GPS time after several attempts.")
-    return None
+    """Fetch GPS time using MAVSDK telemetry."""
+    logging.info("Fetching GPS time from MAVSDK...")
+    async for gps_info in system.telemetry.unix_epoch_time():
+        gps_time_seconds = gps_info.time_us / 1e6  # Convert to seconds
+        return gps_time_seconds
 
 async def set_system_time_from_mavsdk(system):
     """Set system time using the MAVSDK telemetry Unix time."""
@@ -64,7 +54,7 @@ async def set_system_time_from_mavsdk(system):
         await asyncio.sleep(60)  # Update system time every 60 seconds
 
 def mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, timestamp):
-    """Convert MAVSDK GPS data to a gpsd-style JSON TPV report."""
+    """Convert MAVLink GPS data to a gpsd-style JSON TPV report."""
     mode = 3 if fix_type == 3 else 2 if fix_type == 2 else 1  # 3D, 2D, or no fix
 
     # Convert time to UTC
@@ -120,7 +110,7 @@ def start_gpsd_server():
     logging.info("Simulated gpsd running on port 2947. Waiting for clients...")
     return server_socket
 
-def handle_client_connection(client_socket, gps_time_seconds):
+async def handle_client_connection(client_socket, system):
     """Handles communication with a connected client."""
     try:
         # Send gpsd handshake messages
@@ -135,6 +125,7 @@ def handle_client_connection(client_socket, gps_time_seconds):
         fix_type = 3  # Simulated 3D fix
 
         # Use the GPS time fetched via MAVSDK
+        gps_time_seconds = await get_gps_time_from_mavsdk(system)
         gpsd_report = mavlink_to_gpsd_json(lat, lon, alt, speed, track, fix_type, gps_time_seconds)
         client_socket.sendall(gpsd_report.encode('ascii'))
         logging.debug(f"Sent TPV: {gpsd_report.strip()}")
@@ -162,12 +153,7 @@ async def run_server(system, update_system_time):
         while True:
             client_socket, client_addr = server_socket.accept()
             logging.info(f"Client {client_addr} connected!")
-
-            # Get GPS time for this connection
-            gps_time_seconds = await get_gps_time_from_mavsdk(system)
-
-            client_thread = threading.Thread(target=handle_client_connection, args=(client_socket, gps_time_seconds))
-            client_thread.start()
+            await handle_client_connection(client_socket, system)
 
     except KeyboardInterrupt:
         logging.info("Server interrupted by user.")
@@ -179,7 +165,7 @@ async def run_server(system, update_system_time):
 async def main(update_system_time):
     # MAVSDK connection setup
     system = System()
-    await system.connect(system_address="udp://127.0.0.1:14540")  # Replace with your MAVLink endpoint
+    await system.connect(system_address="udp://127.0.0.1:14569")  # Replace with your MAVLink endpoint
 
     logging.info("Connected to MAVLink endpoint")
 
