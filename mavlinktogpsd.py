@@ -147,10 +147,19 @@ async def run_server(system, update_system_time):
 
 async def main(update_system_time):
     system = System()
+    logging.info("Attempting to connect to MAVLink endpoint on udp://127.0.0.1:14569")
+    
     await system.connect(system_address="udp://127.0.0.1:14569")  # Change to your endpoint
 
-    logging.info("Connected to MAVLink endpoint.")
+    async for state in system.core.connection_state():
+        if state.is_connected:
+            logging.info(f"Connected to MAVLink with UUID: {state.uuid}")
+            break
+    else:
+        logging.error("Failed to connect to MAVLink")
+
     await run_server(system, update_system_time)
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Simulated gpsd with optional system time update.")
